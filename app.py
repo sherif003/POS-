@@ -2,39 +2,65 @@
 import streamlit as st
 from streamlit_option_menu import option_menu
 import pandas as pd
-import os
+import sqlite3
 from datetime import datetime
 import plotly.express as px
+import os
 
 # Set page config
 st.set_page_config(page_title="نظام نقاط البيع - متجر ستوتا", layout="wide")
 
-# Initialize data files
-DATA_PATH = "stota_data"
-if not os.path.exists(DATA_PATH):
-    os.makedirs(DATA_PATH)
+# SQLite setup
+DB_FILE = "stota_store.db"
 
-PRODUCTS_FILE = os.path.join(DATA_PATH, "products.csv")
-ORDERS_FILE = os.path.join(DATA_PATH, "orders.csv")
+def init_db():
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    
+    # Create products table
+    c.execute('''CREATE TABLE IF NOT EXISTS products (
+        product_id TEXT PRIMARY KEY,
+        product_name TEXT NOT NULL,
+        original_price REAL NOT NULL,
+        selling_price REAL NOT NULL,
+        stock INTEGER NOT NULL
+    )''')
+    
+    # Create orders table
+    c.execute('''CREATE TABLE IF NOT EXISTS orders (
+        order_id TEXT PRIMARY KEY,
+        date TEXT NOT NULL,
+        products TEXT NOT NULL,
+        total REAL NOT NULL
+    )''')
+    
+    conn.commit()
+    conn.close()
 
-# Load or initialize data
+# Load data from SQLite
 def load_data():
-    try:
-        products = pd.read_csv(PRODUCTS_FILE)
-    except:
+    init_db()
+    conn = sqlite3.connect(DB_FILE)
+    
+    # Load products
+    products = pd.read_sql_query("SELECT * FROM products", conn)
+    if products.empty:
         products = pd.DataFrame(columns=["معرف المنتج", "اسم المنتج", "السعر الأصلي", "سعر البيع", "المخزون"])
     
-    try:
-        orders = pd.read_csv(ORDERS_FILE)
-    except:
+    # Load orders
+    orders = pd.read_sql_query("SELECT * FROM orders", conn)
+    if orders.empty:
         orders = pd.DataFrame(columns=["معرف الطلب", "التاريخ", "المنتجات", "الإجمالي"])
     
+    conn.close()
     return products, orders
 
-# Save data
+# Save data to SQLite
 def save_data(products, orders):
-    products.to_csv(PRODUCTS_FILE, index=False)
-    orders.to_csv(ORDERS_FILE, index=False)
+    conn = sqlite3.connect(DB_FILE)
+    products.to_sql("products", conn, if_exists="replace", index=False)
+    orders.to_sql("orders", conn, if_exists="replace", index=False)
+    conn.close()
 
 # Sidebar menu
 with st.sidebar:
@@ -58,21 +84,26 @@ if selected == "المنتجات":
         with st.form("add_product"):
             product_id = st.text_input("معرف المنتج")
             product_name = st.text_input("اسم المنتج")
-            original_price = st.number_input("السعر الأصلي", min_value=0.0)
-            selling_price = st.number_input("سعر البيع", min_value=0.0)
+            original_price = st.number_input("السعر الأصلي", min_value=0.0, step=0.01)
+            selling_price = st.number_input("سعر البيع", min_value=0.0, step=0.01)
             stock = st.number_input("المخزون", min_value=0, step=1)
             
             if st.form_submit_button("إضافة"):
-                new_product = pd.DataFrame({
-                    "معرف المنتج": [product_id],
-                    "اسم المنتج": [product_name],
-                    "السعر الأصلي": [original_price],
-                    "سعر البيع": [selling_price],
-                    "المخزون": [stock]
-                })
-                products = pd.concat([products, new_product])
-                save_data(products, orders)
-                st.success("تمت إضافة المنتج بنجاح!")
+                if not all([product_id, product_name]):
+                    st.error("يرجى ملء جميع الحقول!")
+                elif product_id in products["معرف المنتج"].values:
+                    st.error("معرف المنتج موجود بالفعل! اختر معرفًا مختلفًا.")
+                else:
+                    new_product = pd.DataFrame({
+                        "معرف المنتج": [product_id],
+                        "اسم المنتج": [product_name],
+                        "السعر الأصلي": [original_price],
+                        "سعر البيع": [selling_price],
+                        "المخزون": [stock]
+                    })
+                    products = pd.concat([products, new_product], ignore_index=True)
+                    save_data(products, orders)
+                    st.success("تمت إضافة المنتج بنجاح!")
     
     with tab2:
         if not products.empty:
@@ -106,26 +137,31 @@ elif selected == "الطلبات":
                          for p in selected_products}
             
             if st.form_submit_button("إنشاء الطلب"):
-                total = 0
-                order_details = []
-                for prod in selected_products:
-                    price = products[products["اسم المنتج"] == prod]["سعر البيع"].iloc[0]
-                    qty = quantities[prod]
-                    total += price * qty
-                    order_details.append(f"{prod}: {qty}")
-                    
-                    # Update stock
-                    products.loc[products["اسم المنتج"] == prod, "المخزون"] -= qty
-                
-                new_order = pd.DataFrame({
-                    "معرف الطلب": [order_id],
-                    "التاريخ": [datetime.now().strftime("%Y-%m-%d %H:%M:%S")],
-                    "المنتجات": [" | ".join(order_details)],
-                    "الإجمالي": [total]
-                })
-                orders = pd.concat([orders, new_order])
-                save_data(products, orders)
-                st.success("تم إنشاء الطلب بنجاح!")
+                if not selected_products:
+                    st.error("يرجى اختيار منتج واحد على الأقل!")
+                else:
+                    total = 0
+                    order_details = []
+                    for prod in selected_products:
+                        price = products[products["اسم المنتج"] == prod]["سعر البيع"].iloc[0]
+                        qty = quantities[prod]
+                        current_stock = products[products["اسم المنتج"] == prod]["المخزون"].iloc[0]
+                        if qty > current_stock:
+                            st.error(f"الكمية المطلوبة لـ {prod} ({qty}) أكبر من المخزون المتاح ({current_stock})!")
+                            break
+                        total += price * qty
+                        order_details.append(f"{prod}: {qty}")
+                        products.loc[products["اسم المنتج"] == prod, "المخزون"] -= qty
+                    else:  # Only execute if no stock errors
+                        new_order = pd.DataFrame({
+                            "معرف الطلب": [order_id],
+                            "التاريخ": [datetime.now().strftime("%Y-%m-%d %H:%M:%S")],
+                            "المنتجات": [" | ".join(order_details)],
+                            "الإجمالي": [total]
+                        })
+                        orders = pd.concat([orders, new_order], ignore_index=True)
+                        save_data(products, orders)
+                        st.success("تم إنشاء الطلب بنجاح!")
     
     with tab2:
         if not orders.empty:
@@ -137,6 +173,7 @@ elif selected == "الرؤى والإحصاءيات":
     if not orders.empty and not products.empty:
         col1, col2, col3 = st.columns(3)
         total_income = orders["الإجمالي"].sum()
+        # Simplified cost calculation (assumes initial stock was max stock)
         total_cost = sum(products["السعر الأصلي"] * (products["المخزون"].max() - products["المخزون"]))
         net_profit = total_income - total_cost
         
@@ -147,7 +184,6 @@ elif selected == "الرؤى والإحصاءيات":
         with col3:
             st.metric("إجمالي التكاليف", f"{total_cost:,.2f} ريال")
         
-        # Charts
         fig1 = px.pie(orders, values="الإجمالي", names="معرف الطلب", title="توزيع المبيعات حسب الطلب")
         st.plotly_chart(fig1)
         
