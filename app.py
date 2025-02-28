@@ -14,7 +14,7 @@ st.set_page_config(page_title="نظام نقاط البيع - متجر ستوت�
 DB_FILE = "stota_store.db"
 
 def init_db():
-    conn = sqlite3.connect(DB_FILE)
+    conn = sqlite3.connect(DB_FILE, check_same_thread=False)
     c = conn.cursor()
     
     c.execute('''CREATE TABLE IF NOT EXISTS products (
@@ -42,37 +42,49 @@ def init_db():
     conn.commit()
     conn.close()
 
-# Load data from SQLite
 def load_data():
-    init_db()
-    conn = sqlite3.connect(DB_FILE)
+    conn = sqlite3.connect(DB_FILE, check_same_thread=False)
     
-    products = pd.read_sql_query("SELECT * FROM products", conn)
-    if products.empty:
+    try:
+        products = pd.read_sql_query("SELECT * FROM products", conn)
+    except:
         products = pd.DataFrame(columns=["معرف المنتج", "اسم المنتج", "السعر الأصلي", "سعر البيع", "المخزون"])
+        products.to_sql("products", conn, if_exists="replace", index=False)
     
-    orders = pd.read_sql_query("SELECT * FROM orders", conn)
-    if orders.empty:
+    try:
+        orders = pd.read_sql_query("SELECT * FROM orders", conn)
+    except:
         orders = pd.DataFrame(columns=["معرف الطلب", "التاريخ", "المنتجات", "الإجمالي"])
+        orders.to_sql("orders", conn, if_exists="replace", index=False)
     
-    expenses = pd.read_sql_query("SELECT * FROM expenses", conn)
-    if expenses.empty:
+    try:
+        expenses = pd.read_sql_query("SELECT * FROM expenses", conn)
+    except:
         expenses = pd.DataFrame(columns=["معرف المصروف", "التاريخ", "المبلغ", "التعليق"])
+        expenses.to_sql("expenses", conn, if_exists="replace", index=False)
     
     conn.close()
     return products, orders, expenses
 
-# Save data to SQLite
 def save_data(products, orders, expenses):
-    conn = sqlite3.connect(DB_FILE)
-    products.to_sql("products", conn, if_exists="replace", index=False)
-    orders.to_sql("orders", conn, if_exists="replace", index=False)
-    expenses.to_sql("expenses", conn, if_exists="replace", index=False)
-    conn.close()
+    conn = sqlite3.connect(DB_FILE, check_same_thread=False)
+    try:
+        products.to_sql("products", conn, if_exists="replace", index=False)
+        orders.to_sql("orders", conn, if_exists="replace", index=False)
+        expenses.to_sql("expenses", conn, if_exists="replace", index=False)
+        conn.commit()
+    except Exception as e:
+        st.error(f"خطأ في حفظ البيانات: {str(e)}")
+    finally:
+        conn.close()
 
 def reset_db():
     if os.path.exists(DB_FILE):
         os.remove(DB_FILE)
+    init_db()
+
+# Initialize database if not exists
+if not os.path.exists(DB_FILE):
     init_db()
 
 # Sidebar menu
@@ -92,7 +104,10 @@ if selected == "الرئيسية":
     st.header("لوحة التحكم - متجر ستوتا")
     total_income = orders["الإجمالي"].sum() if not orders.empty else 0
     total_expenses = expenses["المبلغ"].sum() if not expenses.empty else 0
-    sold_product_cost = sum(products["السعر الأصلي"] * (products["المخزون"].max() - products["المخزون"])) if not products.empty else 0
+    sold_product_cost = 0
+    if not products.empty:
+        products["sold_qty"] = products["المخزون"].max() - products["المخزون"]
+        sold_product_cost = (products["السعر الأصلي"] * products["sold_qty"]).sum()
     net_profit = total_income - (sold_product_cost + total_expenses)
     
     col1, col2, col3, col4 = st.columns(4)
@@ -133,13 +148,14 @@ elif selected == "المنتجات":
                         "سعر البيع": [selling_price],
                         "المخزون": [stock]
                     })
-                    products = pd.concat([products, new_product], ignore_index=True)
+                    products = pd.concat([products.drop(columns=["sold_qty"], errors="ignore"), new_product], ignore_index=True)
                     save_data(products, orders, expenses)
                     st.success("تمت إضافة المنتج بنجاح!")
+                    st.experimental_rerun()
     
     with tab2:
         if not filtered_products.empty:
-            st.dataframe(filtered_products)
+            st.dataframe(filtered_products.drop(columns=["sold_qty"], errors="ignore"))
             product_to_edit = st.selectbox("اختر المنتج للتعديل", filtered_products["معرف المنتج"])
             product_data = products[products["معرف المنتج"] == product_to_edit].iloc[0]
             
@@ -150,11 +166,12 @@ elif selected == "المنتجات":
                 new_stock = st.number_input("المخزون", value=int(product_data["المخزون"]))
                 
                 if st.form_submit_button("حفظ التعديلات"):
-                    products.loc[products["معرف المنتج"] == product_to_edit] = [
+                    products.loc[products["معرف المنتج"] == product_to_edit, ["معرف المنتج", "اسم المنتج", "السعر الأصلي", "سعر البيع", "المخزون"]] = [
                         product_to_edit, new_name, new_original, new_selling, new_stock
                     ]
                     save_data(products, orders, expenses)
                     st.success("تم تعديل المنتج بنجاح!")
+                    st.experimental_rerun()
 
 elif selected == "الطلبات":
     st.header("إدارة الطلبات")
@@ -165,8 +182,8 @@ elif selected == "الطلبات":
         with st.form("new_order"):
             order_id = f"ORD{datetime.now().strftime('%Y%m%d%H%M%S')}"
             st.write("المنتجات المتاحة:")
-            for _, row in products.iterrows():
-                st.write(f"{row['اسم المنتج']} - المخزون: {row['المخزون']} - السعر: {row['سعر البيع']} جنية")
+            available_products = products.drop(columns=["sold_qty"], errors="ignore")
+            st.dataframe(available_products[["اسم المنتج", "المخزون", "سعر البيع"]])
             
             selected_products = st.multiselect("اختر المنتجات", products["اسم المنتج"])
             quantities = {}
@@ -174,7 +191,7 @@ elif selected == "الطلبات":
             if selected_products:
                 st.write("معاينة الطلب:")
                 for prod in selected_products:
-                    qty = st.number_input(f"الكمية لـ {prod}", min_value=1, step=1, key=prod)
+                    qty = st.number_input(f"الكمية لـ {prod}", min_value=1, step=1, key=f"new_{prod}_{order_id}")
                     quantities[prod] = qty
                     price = products[products["اسم المنتج"] == prod]["سعر البيع"].iloc[0]
                     total_preview += price * qty
@@ -206,6 +223,7 @@ elif selected == "الطلبات":
                         orders = pd.concat([orders, new_order], ignore_index=True)
                         save_data(products, orders, expenses)
                         st.success("تم إنشاء الطلب بنجاح!")
+                        st.experimental_rerun()
     
     with tab2:
         if not orders.empty:
@@ -222,7 +240,7 @@ elif selected == "الطلبات":
                 if selected_products:
                     for prod in selected_products:
                         default_qty = next((int(p.split(":")[1]) for p in order_data["المنتجات"].split(" | ") if p.startswith(prod)), 1)
-                        qty = st.number_input(f"الكمية لـ {prod}", min_value=1, step=1, value=default_qty, key=f"edit_{prod}")
+                        qty = st.number_input(f"الكمية لـ {prod}", min_value=1, step=1, value=default_qty, key=f"edit_{prod}_{order_to_edit}")
                         quantities[prod] = qty
                         price = products[products["اسم المنتج"] == prod]["سعر البيع"].iloc[0]
                         total_preview += price * qty
@@ -231,7 +249,8 @@ elif selected == "الطلبات":
                 if st.form_submit_button("حفظ التعديلات"):
                     old_items = {p.split(":")[0].strip(): int(p.split(":")[1]) for p in order_data["المنتجات"].split(" | ")}
                     for prod, qty in old_items.items():
-                        products.loc[products["اسم المنتج"] == prod, "المخزون"] += qty
+                        if prod in products["اسم المنتج"].values:
+                            products.loc[products["اسم المنتج"] == prod, "المخزون"] += qty
                     
                     total = 0
                     order_details = []
@@ -246,11 +265,12 @@ elif selected == "الطلبات":
                         order_details.append(f"{prod}: {qty}")
                         products.loc[products["اسم المنتج"] == prod, "المخزون"] -= qty
                     else:
-                        orders.loc[orders["معرف الطلب"] == order_to_edit] = [
+                        orders.loc[orders["معرف الطلب"] == order_to_edit, ["معرف الطلب", "التاريخ", "المنتجات", "الإجمالي"]] = [
                             order_to_edit, order_data["التاريخ"], " | ".join(order_details), total
                         ]
                         save_data(products, orders, expenses)
                         st.success("تم تعديل الطلب بنجاح!")
+                        st.experimental_rerun()
 
 elif selected == "المصروفات":
     st.header("إدارة المصروفات")
@@ -263,7 +283,7 @@ elif selected == "المصروفات":
                 st.error("يرجى إدخال مبلغ صالح وتعليق!")
             else:
                 new_expense = pd.DataFrame({
-                    "معرف المصروف": [None],  # Auto-incremented by SQLite
+                    "معرف المصروف": [None],
                     "التاريخ": [datetime.now().strftime("%Y-%m-%d %H:%M:%S")],
                     "المبلغ": [amount],
                     "التعليق": [comment]
@@ -271,6 +291,7 @@ elif selected == "المصروفات":
                 expenses = pd.concat([expenses, new_expense], ignore_index=True)
                 save_data(products, orders, expenses)
                 st.success("تمت إضافة المصروف بنجاح!")
+                st.experimental_rerun()
     
     if not expenses.empty:
         st.dataframe(expenses)
@@ -287,7 +308,7 @@ elif selected == "الاسترداد":
             refund_items = {}
             for item in order_data["المنتجات"].split(" | "):
                 prod, qty = item.split(":")
-                refund_qty = st.number_input(f"كمية الاسترداد لـ {prod}", min_value=0, max_value=int(qty), step=1, key=f"refund_{prod}")
+                refund_qty = st.number_input(f"كمية الاسترداد لـ {prod}", min_value=0, max_value=int(qty), step=1, key=f"refund_{prod}_{order_to_refund}")
                 if refund_qty > 0:
                     refund_items[prod.strip()] = refund_qty
             
@@ -312,10 +333,11 @@ elif selected == "الاسترداد":
                         orders.loc[orders["معرف الطلب"] == order_to_refund, "المنتجات"] = " | ".join(new_details)
                         orders.loc[orders["معرف الطلب"] == order_to_refund, "الإجمالي"] -= total_refunded
                     else:
-                        orders = orders[orders["معرف الطلب"] != order_to_refund]
+                        orders = orders[orders["معرف الطلب"] != order_to_refund].reset_index(drop=True)
                     
                     save_data(products, orders, expenses)
                     st.success(f"تم استرداد {total_refunded:,.2f} جنية بنجاح!")
+                    st.experimental_rerun()
     else:
         st.info("لا توجد طلبات للاسترداد.")
 
@@ -325,7 +347,8 @@ elif selected == "الرؤى والإحصاءيات":
     if not orders.empty and not products.empty:
         total_income = orders["الإجمالي"].sum()
         total_expenses = expenses["المبلغ"].sum() if not expenses.empty else 0
-        sold_product_cost = sum(products["السعر الأصلي"] * (products["المخزون"].max() - products["المخزون"])) if not products.empty else 0
+        products["sold_qty"] = products["المخزون"].max() - products["المخزون"]
+        sold_product_cost = (products["السعر الأصلي"] * products["sold_qty"]).sum()
         net_profit = total_income - (sold_product_cost + total_expenses)
         
         col1, col2, col3, col4 = st.columns(4)
@@ -367,41 +390,51 @@ elif selected == "التصدير":
     
     export_type = st.selectbox("اختر نوع البيانات", ["المنتجات", "الطلبات", "المصروفات", "الكل"])
     if st.button("تصدير إلى CSV"):
-        if export_type == "المنتجات":
-            products.to_csv("exported_products.csv", index=False)
-            st.download_button("تحميل", data=open("exported_products.csv", "rb"), file_name="exported_products.csv")
-        elif export_type == "الطلبات":
-            orders.to_csv("exported_orders.csv", index=False)
-            st.download_button("تحميل", data=open("exported_orders.csv", "rb"), file_name="exported_orders.csv")
-        elif export_type == "المصروفات":
-            expenses.to_csv("exported_expenses.csv", index=False)
-            st.download_button("تحميل", data=open("exported_expenses.csv", "rb"), file_name="exported_expenses.csv")
-        else:
-            with pd.ExcelWriter("stota_full_data.xlsx") as writer:
-                products.to_excel(writer, sheet_name="المنتجات", index=False)
-                orders.to_excel(writer, sheet_name="الطلبات", index=False)
-                expenses.to_excel(writer, sheet_name="المصروفات", index=False)
-            st.download_button("تحميل", data=open("stota_full_data.xlsx", "rb"), file_name="stota_full_data.xlsx")
-        st.success("تم التصدير بنجاح!")
+        try:
+            if export_type == "المنتجات":
+                products.drop(columns=["sold_qty"], errors="ignore").to_csv("exported_products.csv", index=False)
+                st.download_button("تحميل", data=open("exported_products.csv", "rb"), file_name="exported_products.csv")
+            elif export_type == "الطلبات":
+                orders.to_csv("exported_orders.csv", index=False)
+                st.download_button("تحميل", data=open("exported_orders.csv", "rb"), file_name="exported_orders.csv")
+            elif export_type == "المصروفات":
+                expenses.to_csv("exported_expenses.csv", index=False)
+                st.download_button("تحميل", data=open("exported_expenses.csv", "rb"), file_name="exported_expenses.csv")
+            else:
+                with pd.ExcelWriter("stota_full_data.xlsx") as writer:
+                    products.drop(columns=["sold_qty"], errors="ignore").to_excel(writer, sheet_name="المنتجات", index=False)
+                    orders.to_excel(writer, sheet_name="الطلبات", index=False)
+                    expenses.to_excel(writer, sheet_name="المصروفات", index=False)
+                st.download_button("تحميل", data=open("stota_full_data.xlsx", "rb"), file_name="stota_full_data.xlsx")
+            st.success("تم التصدير بنجاح!")
+        except Exception as e:
+            st.error(f"خطأ في التصدير: {str(e)}")
     
     st.subheader("إدارة قاعدة البيانات")
     col1, col2 = st.columns(2)
     with col1:
         if st.button("تحميل قاعدة البيانات"):
-            with open(DB_FILE, "rb") as f:
-                st.download_button("تنزيل stota_store.db", f, file_name="stota_store.db")
-            st.success("تم تحضير قاعدة البيانات!")
+            try:
+                with open(DB_FILE, "rb") as f:
+                    st.download_button("تنزيل stota_store.db", f, file_name="stota_store.db")
+                st.success("تم تحضير قاعدة البيانات!")
+            except Exception as e:
+                st.error(f"خطأ في التحميل: {str(e)}")
     with col2:
         uploaded_file = st.file_uploader("رفع قاعدة بيانات", type=["db"])
         if uploaded_file:
-            with open(DB_FILE, "wb") as f:
-                f.write(uploaded_file.getbuffer())
-            st.success("تم رفع قاعدة البيانات! أعد تشغيل التطبيق.")
+            try:
+                with open(DB_FILE, "wb") as f:
+                    f.write(uploaded_file.getbuffer())
+                st.success("تم رفع قاعدة البيانات! أعد تشغيل التطبيق.")
+                st.experimental_rerun()
+            except Exception as e:
+                st.error(f"خطأ في الرفع: {str(e)}")
 
 elif selected == "إعادة تعيين":
     st.header("إعادة تعيين التطبيق")
     st.warning("سيؤدي هذا إلى حذف جميع البيانات (المنتجات، الطلبات، المصروفات). هل أنت متأكد؟")
     if st.button("إعادة تعيين الكل"):
         reset_db()
-        st.success("تم إعادة تعيين التطبيق بنجاح! أعد تشغيل الصفحة.")
+        st.success("تم إعادة تعيين التطبيق بنجاح!")
         st.experimental_rerun()
