@@ -6,6 +6,11 @@ import sqlite3
 from datetime import datetime
 import plotly.express as px
 import os
+import logging
+
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # Set page config
 st.set_page_config(page_title="نظام نقاط البيع - متجر ستوتا", layout="wide")
@@ -47,19 +52,22 @@ def load_data():
     
     try:
         products = pd.read_sql_query("SELECT * FROM products", conn)
-    except:
+    except Exception as e:
+        logger.error(f"Error loading products: {e}")
         products = pd.DataFrame(columns=["معرف المنتج", "اسم المنتج", "السعر الأصلي", "سعر البيع", "المخزون"])
         products.to_sql("products", conn, if_exists="replace", index=False)
     
     try:
         orders = pd.read_sql_query("SELECT * FROM orders", conn)
-    except:
+    except Exception as e:
+        logger.error(f"Error loading orders: {e}")
         orders = pd.DataFrame(columns=["معرف الطلب", "التاريخ", "المنتجات", "الإجمالي"])
         orders.to_sql("orders", conn, if_exists="replace", index=False)
     
     try:
         expenses = pd.read_sql_query("SELECT * FROM expenses", conn)
-    except:
+    except Exception as e:
+        logger.error(f"Error loading expenses: {e}")
         expenses = pd.DataFrame(columns=["معرف المصروف", "التاريخ", "المبلغ", "التعليق"])
         expenses.to_sql("expenses", conn, if_exists="replace", index=False)
     
@@ -73,8 +81,10 @@ def save_data(products, orders, expenses):
         orders.to_sql("orders", conn, if_exists="replace", index=False)
         expenses.to_sql("expenses", conn, if_exists="replace", index=False)
         conn.commit()
+        logger.info("Data saved successfully")
     except Exception as e:
         st.error(f"خطأ في حفظ البيانات: {str(e)}")
+        logger.error(f"Error saving data: {e}")
     finally:
         conn.close()
 
@@ -135,23 +145,29 @@ elif selected == "المنتجات":
             selling_price = st.number_input("سعر البيع", min_value=0.0, step=0.01)
             stock = st.number_input("المخزون", min_value=0, step=1)
             
-            if st.form_submit_button("إضافة"):
+            submitted = st.form_submit_button("إضافة")
+            if submitted:
                 if not all([product_id, product_name]):
                     st.error("يرجى ملء جميع الحقول!")
                 elif product_id in products["معرف المنتج"].values:
                     st.error("معرف المنتج موجود بالفعل!")
                 else:
-                    new_product = pd.DataFrame({
-                        "معرف المنتج": [product_id],
-                        "اسم المنتج": [product_name],
-                        "السعر الأصلي": [original_price],
-                        "سعر البيع": [selling_price],
-                        "المخزون": [stock]
-                    })
-                    products = pd.concat([products.drop(columns=["sold_qty"], errors="ignore"), new_product], ignore_index=True)
-                    save_data(products, orders, expenses)
-                    st.success("تمت إضافة المنتج بنجاح!")
-                    st.experimental_rerun()
+                    try:
+                        new_product = pd.DataFrame({
+                            "معرف المنتج": [product_id],
+                            "اسم المنتج": [product_name],
+                            "السعر الأصلي": [original_price],
+                            "سعر البيع": [selling_price],
+                            "المخزون": [stock]
+                        })
+                        products = pd.concat([products.drop(columns=["sold_qty"], errors="ignore"), new_product], ignore_index=True)
+                        save_data(products, orders, expenses)
+                        st.success("تمت إضافة المنتج بنجاح!")
+                        # Instead of rerun, clear form by resetting state
+                        st.session_state["add_product_form"] = False
+                    except Exception as e:
+                        st.error(f"خطأ أثناء إضافة المنتج: {str(e)}")
+                        logger.error(f"Error adding product: {e}")
     
     with tab2:
         if not filtered_products.empty:
@@ -166,12 +182,15 @@ elif selected == "المنتجات":
                 new_stock = st.number_input("المخزون", value=int(product_data["المخزون"]))
                 
                 if st.form_submit_button("حفظ التعديلات"):
-                    products.loc[products["معرف المنتج"] == product_to_edit, ["معرف المنتج", "اسم المنتج", "السعر الأصلي", "سعر البيع", "المخزون"]] = [
-                        product_to_edit, new_name, new_original, new_selling, new_stock
-                    ]
-                    save_data(products, orders, expenses)
-                    st.success("تم تعديل المنتج بنجاح!")
-                    st.experimental_rerun()
+                    try:
+                        products.loc[products["معرف المنتج"] == product_to_edit, ["معرف المنتج", "اسم المنتج", "السعر الأصلي", "سعر البيع", "المخزون"]] = [
+                            product_to_edit, new_name, new_original, new_selling, new_stock
+                        ]
+                        save_data(products, orders, expenses)
+                        st.success("تم تعديل المنتج بنجاح!")
+                    except Exception as e:
+                        st.error(f"خطأ أثناء تعديل المنتج: {str(e)}")
+                        logger.error(f"Error editing product: {e}")
 
 elif selected == "الطلبات":
     st.header("إدارة الطلبات")
@@ -201,30 +220,33 @@ elif selected == "الطلبات":
                 if not selected_products:
                     st.error("يرجى اختيار منتج واحد على الأقل!")
                 else:
-                    total = 0
-                    order_details = []
-                    for prod in selected_products:
-                        price = products[products["اسم المنتج"] == prod]["سعر البيع"].iloc[0]
-                        qty = quantities[prod]
-                        current_stock = products[products["اسم المنتج"] == prod]["المخزون"].iloc[0]
-                        if qty > current_stock:
-                            st.error(f"الكمية المطلوبة لـ {prod} ({qty}) أكبر من المخزون ({current_stock})!")
-                            break
-                        total += price * qty
-                        order_details.append(f"{prod}: {qty}")
-                        products.loc[products["اسم المنتج"] == prod, "المخزون"] -= qty
-                    else:
-                        new_order = pd.DataFrame({
-                            "معرف الطلب": [order_id],
-                            "التاريخ": [datetime.now().strftime("%Y-%m-%d %H:%M:%S")],
-                            "المنتجات": [" | ".join(order_details)],
-                            "الإجمالي": [total]
-                        })
-                        orders = pd.concat([orders, new_order], ignore_index=True)
-                        save_data(products, orders, expenses)
-                        st.success("تم إنشاء الطلب بنجاح!")
-                        st.experimental_rerun()
-    
+                    try:
+                        total = 0
+                        order_details = []
+                        for prod in selected_products:
+                            price = products[products["اسم المنتج"] == prod]["سعر البيع"].iloc[0]
+                            qty = quantities[prod]
+                            current_stock = products[products["اسم المنتج"] == prod]["المخزون"].iloc[0]
+                            if qty > current_stock:
+                                st.error(f"الكمية المطلوبة لـ {prod} ({qty}) أكبر من المخزون ({current_stock})!")
+                                break
+                            total += price * qty
+                            order_details.append(f"{prod}: {qty}")
+                            products.loc[products["اسم المنتج"] == prod, "المخزون"] -= qty
+                        else:
+                            new_order = pd.DataFrame({
+                                "معرف الطلب": [order_id],
+                                "التاريخ": [datetime.now().strftime("%Y-%m-%d %H:%M:%S")],
+                                "المنتجات": [" | ".join(order_details)],
+                                "الإجمالي": [total]
+                            })
+                            orders = pd.concat([orders, new_order], ignore_index=True)
+                            save_data(products, orders, expenses)
+                            st.success("تم إنشاء الطلب بنجاح!")
+                    except Exception as e:
+                        st.error(f"خطأ أثناء إنشاء الطلب: {str(e)}")
+                        logger.error(f"Error creating order: {e}")
+
     with tab2:
         if not orders.empty:
             st.dataframe(orders)
@@ -247,30 +269,33 @@ elif selected == "الطلبات":
                     st.write(f"الإجمالي الجديد المتوقع: {total_preview:,.2f} جنية")
                 
                 if st.form_submit_button("حفظ التعديلات"):
-                    old_items = {p.split(":")[0].strip(): int(p.split(":")[1]) for p in order_data["المنتجات"].split(" | ")}
-                    for prod, qty in old_items.items():
-                        if prod in products["اسم المنتج"].values:
-                            products.loc[products["اسم المنتج"] == prod, "المخزون"] += qty
-                    
-                    total = 0
-                    order_details = []
-                    for prod in selected_products:
-                        price = products[products["اسم المنتج"] == prod]["سعر البيع"].iloc[0]
-                        qty = quantities[prod]
-                        current_stock = products[products["اسم المنتج"] == prod]["المخزون"].iloc[0]
-                        if qty > current_stock:
-                            st.error(f"الكمية المطلوبة لـ {prod} ({qty}) أكبر من المخزون ({current_stock})!")
-                            break
-                        total += price * qty
-                        order_details.append(f"{prod}: {qty}")
-                        products.loc[products["اسم المنتج"] == prod, "المخزون"] -= qty
-                    else:
-                        orders.loc[orders["معرف الطلب"] == order_to_edit, ["معرف الطلب", "التاريخ", "المنتجات", "الإجمالي"]] = [
-                            order_to_edit, order_data["التاريخ"], " | ".join(order_details), total
-                        ]
-                        save_data(products, orders, expenses)
-                        st.success("تم تعديل الطلب بنجاح!")
-                        st.experimental_rerun()
+                    try:
+                        old_items = {p.split(":")[0].strip(): int(p.split(":")[1]) for p in order_data["المنتجات"].split(" | ")}
+                        for prod, qty in old_items.items():
+                            if prod in products["اسم المنتج"].values:
+                                products.loc[products["اسم المنتج"] == prod, "المخزون"] += qty
+                        
+                        total = 0
+                        order_details = []
+                        for prod in selected_products:
+                            price = products[products["اسم المنتج"] == prod]["سعر البيع"].iloc[0]
+                            qty = quantities[prod]
+                            current_stock = products[products["اسم المنتج"] == prod]["المخزون"].iloc[0]
+                            if qty > current_stock:
+                                st.error(f"الكمية المطلوبة لـ {prod} ({qty}) أكبر من المخزون ({current_stock})!")
+                                break
+                            total += price * qty
+                            order_details.append(f"{prod}: {qty}")
+                            products.loc[products["اسم المنتج"] == prod, "المخزون"] -= qty
+                        else:
+                            orders.loc[orders["معرف الطلب"] == order_to_edit, ["معرف الطلب", "التاريخ", "المنتجات", "الإجمالي"]] = [
+                                order_to_edit, order_data["التاريخ"], " | ".join(order_details), total
+                            ]
+                            save_data(products, orders, expenses)
+                            st.success("تم تعديل الطلب بنجاح!")
+                    except Exception as e:
+                        st.error(f"خطأ أثناء تعديل الطلب: {str(e)}")
+                        logger.error(f"Error editing order: {e}")
 
 elif selected == "المصروفات":
     st.header("إدارة المصروفات")
@@ -282,16 +307,19 @@ elif selected == "المصروفات":
             if not comment or amount <= 0:
                 st.error("يرجى إدخال مبلغ صالح وتعليق!")
             else:
-                new_expense = pd.DataFrame({
-                    "معرف المصروف": [None],
-                    "التاريخ": [datetime.now().strftime("%Y-%m-%d %H:%M:%S")],
-                    "المبلغ": [amount],
-                    "التعليق": [comment]
-                })
-                expenses = pd.concat([expenses, new_expense], ignore_index=True)
-                save_data(products, orders, expenses)
-                st.success("تمت إضافة المصروف بنجاح!")
-                st.experimental_rerun()
+                try:
+                    new_expense = pd.DataFrame({
+                        "معرف المصروف": [None],
+                        "التاريخ": [datetime.now().strftime("%Y-%m-%d %H:%M:%S")],
+                        "المبلغ": [amount],
+                        "التعليق": [comment]
+                    })
+                    expenses = pd.concat([expenses, new_expense], ignore_index=True)
+                    save_data(products, orders, expenses)
+                    st.success("تمت إضافة المصروف بنجاح!")
+                except Exception as e:
+                    st.error(f"خطأ أثناء إضافة المصروف: {str(e)}")
+                    logger.error(f"Error adding expense: {e}")
     
     if not expenses.empty:
         st.dataframe(expenses)
@@ -316,28 +344,31 @@ elif selected == "الاسترداد":
                 if not refund_items:
                     st.error("يرجى اختيار كمية للاسترداد!")
                 else:
-                    total_refunded = 0
-                    old_items = {p.split(":")[0].strip(): int(p.split(":")[1]) for p in order_data["المنتجات"].split(" | ")}
-                    new_details = []
-                    for prod, old_qty in old_items.items():
-                        refund_qty = refund_items.get(prod, 0)
-                        if refund_qty > 0:
-                            price = products[products["اسم المنتج"] == prod]["سعر البيع"].iloc[0]
-                            total_refunded += price * refund_qty
-                            products.loc[products["اسم المنتج"] == prod, "المخزون"] += refund_qty
-                        remaining_qty = old_qty - refund_qty
-                        if remaining_qty > 0:
-                            new_details.append(f"{prod}: {remaining_qty}")
-                    
-                    if new_details:
-                        orders.loc[orders["معرف الطلب"] == order_to_refund, "المنتجات"] = " | ".join(new_details)
-                        orders.loc[orders["معرف الطلب"] == order_to_refund, "الإجمالي"] -= total_refunded
-                    else:
-                        orders = orders[orders["معرف الطلب"] != order_to_refund].reset_index(drop=True)
-                    
-                    save_data(products, orders, expenses)
-                    st.success(f"تم استرداد {total_refunded:,.2f} جنية بنجاح!")
-                    st.experimental_rerun()
+                    try:
+                        total_refunded = 0
+                        old_items = {p.split(":")[0].strip(): int(p.split(":")[1]) for p in order_data["المنتجات"].split(" | ")}
+                        new_details = []
+                        for prod, old_qty in old_items.items():
+                            refund_qty = refund_items.get(prod, 0)
+                            if refund_qty > 0:
+                                price = products[products["اسم المنتج"] == prod]["سعر البيع"].iloc[0]
+                                total_refunded += price * refund_qty
+                                products.loc[products["اسم المنتج"] == prod, "المخزون"] += refund_qty
+                            remaining_qty = old_qty - refund_qty
+                            if remaining_qty > 0:
+                                new_details.append(f"{prod}: {remaining_qty}")
+                        
+                        if new_details:
+                            orders.loc[orders["معرف الطلب"] == order_to_refund, "المنتجات"] = " | ".join(new_details)
+                            orders.loc[orders["معرف الطلب"] == order_to_refund, "الإجمالي"] -= total_refunded
+                        else:
+                            orders = orders[orders["معرف الطلب"] != order_to_refund].reset_index(drop=True)
+                        
+                        save_data(products, orders, expenses)
+                        st.success(f"تم استرداد {total_refunded:,.2f} جنية بنجاح!")
+                    except Exception as e:
+                        st.error(f"خطأ أثناء الاسترداد: {str(e)}")
+                        logger.error(f"Error processing refund: {e}")
     else:
         st.info("لا توجد طلبات للاسترداد.")
 
@@ -409,6 +440,7 @@ elif selected == "التصدير":
             st.success("تم التصدير بنجاح!")
         except Exception as e:
             st.error(f"خطأ في التصدير: {str(e)}")
+            logger.error(f"Error exporting data: {e}")
     
     st.subheader("إدارة قاعدة البيانات")
     col1, col2 = st.columns(2)
@@ -420,21 +452,26 @@ elif selected == "التصدير":
                 st.success("تم تحضير قاعدة البيانات!")
             except Exception as e:
                 st.error(f"خطأ في التحميل: {str(e)}")
+                logger.error(f"Error downloading database: {e}")
     with col2:
         uploaded_file = st.file_uploader("رفع قاعدة بيانات", type=["db"])
         if uploaded_file:
             try:
                 with open(DB_FILE, "wb") as f:
                     f.write(uploaded_file.getbuffer())
-                st.success("تم رفع قاعدة البيانات! أعد تشغيل التطبيق.")
-                st.experimental_rerun()
+                st.success("تم رفع قاعدة البيانات! أعد تشغيل التطبيق يدويًا إذا لزم الأمر.")
             except Exception as e:
                 st.error(f"خطأ في الرفع: {str(e)}")
+                logger.error(f"Error uploading database: {e}")
 
 elif selected == "إعادة تعيين":
     st.header("إعادة تعيين التطبيق")
     st.warning("سيؤدي هذا إلى حذف جميع البيانات (المنتجات، الطلبات، المصروفات). هل أنت متأكد؟")
     if st.button("إعادة تعيين الكل"):
-        reset_db()
-        st.success("تم إعادة تعيين التطبيق بنجاح!")
-        st.experimental_rerun()
+        try:
+            reset_db()
+            st.success("تم إعادة تعيين التطبيق بنجاح!")
+            # No rerun here; let user refresh manually if needed
+        except Exception as e:
+            st.error(f"خطأ أثناء إعادة التعيين: {str(e)}")
+            logger.error(f"Error resetting app: {e}")
