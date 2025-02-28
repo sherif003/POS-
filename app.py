@@ -70,12 +70,17 @@ def save_data(products, orders, expenses):
     expenses.to_sql("expenses", conn, if_exists="replace", index=False)
     conn.close()
 
+def reset_db():
+    if os.path.exists(DB_FILE):
+        os.remove(DB_FILE)
+    init_db()
+
 # Sidebar menu
 with st.sidebar:
     selected = option_menu(
         "القائمة الرئيسية",
-        ["الرئيسية", "المنتجات", "الطلبات", "المصروفات", "الرؤى والإحصاءيات", "التصدير"],
-        icons=["house", "box", "cart", "cash", "bar-chart", "download"],
+        ["الرئيسية", "المنتجات", "الطلبات", "المصروفات", "الاسترداد", "الرؤى والإحصاءيات", "التصدير", "إعادة تعيين"],
+        icons=["house", "box", "cart", "cash", "arrow-left", "bar-chart", "download", "arrow-clockwise"],
         menu_icon="shop",
         default_index=0,
     )
@@ -87,24 +92,23 @@ if selected == "الرئيسية":
     st.header("لوحة التحكم - متجر ستوتا")
     total_income = orders["الإجمالي"].sum() if not orders.empty else 0
     total_expenses = expenses["المبلغ"].sum() if not expenses.empty else 0
-    product_costs = sum((products["سعر البيع"] - products["السعر الأصلي"]) * (products["المخزون"].max() - products["المخزون"])) if not products.empty else 0
-    net_profit = total_income - product_costs - total_expenses
+    sold_product_cost = sum(products["السعر الأصلي"] * (products["المخزون"].max() - products["المخزون"])) if not products.empty else 0
+    net_profit = total_income - (sold_product_cost + total_expenses)
     
-    col1, col2, col3 = st.columns(3)
+    col1, col2, col3, col4 = st.columns(4)
     with col1:
-        st.metric("إجمالي الدخل", f"{total_income:,.2f} ريال")
+        st.metric("إجمالي الدخل", f"{total_income:,.2f} جنية")
     with col2:
-        st.metric("إجمالي المصروفات", f"{total_expenses:,.2f} ريال")
+        st.metric("تكلفة المنتجات المباعة", f"{sold_product_cost:,.2f} جنية")
     with col3:
-        st.metric("صافي الربح", f"{net_profit:,.2f} ريال")
+        st.metric("المصروفات الإضافية", f"{total_expenses:,.2f} جنية")
+    with col4:
+        st.metric("صافي الربح", f"{net_profit:,.2f} جنية")
 
 elif selected == "المنتجات":
     st.header("إدارة المنتجات")
     search_term = st.text_input("ابحث عن منتج", "")
-    if search_term:
-        filtered_products = products[products["اسم المنتج"].str.contains(search_term, case=False, na=False)]
-    else:
-        filtered_products = products
+    filtered_products = products[products["اسم المنتج"].str.contains(search_term, case=False, na=False)] if search_term else products
     
     tab1, tab2 = st.tabs(["إضافة منتج", "تعديل المنتجات"])
     
@@ -161,8 +165,8 @@ elif selected == "الطلبات":
         with st.form("new_order"):
             order_id = f"ORD{datetime.now().strftime('%Y%m%d%H%M%S')}"
             st.write("المنتجات المتاحة:")
-            for index, row in products.iterrows():
-                st.write(f"{row['اسم المنتج']} - المخزون: {row['المخزون']} - السعر: {row['سعر البيع']} ريال")
+            for _, row in products.iterrows():
+                st.write(f"{row['اسم المنتج']} - المخزون: {row['المخزون']} - السعر: {row['سعر البيع']} جنية")
             
             selected_products = st.multiselect("اختر المنتجات", products["اسم المنتج"])
             quantities = {}
@@ -174,7 +178,7 @@ elif selected == "الطلبات":
                     quantities[prod] = qty
                     price = products[products["اسم المنتج"] == prod]["سعر البيع"].iloc[0]
                     total_preview += price * qty
-                st.write(f"الإجمالي المتوقع: {total_preview:,.2f} ريال")
+                st.write(f"الإجمالي المتوقع: {total_preview:,.2f} جنية")
             
             if st.form_submit_button("إنشاء الطلب"):
                 if not selected_products:
@@ -222,15 +226,13 @@ elif selected == "الطلبات":
                         quantities[prod] = qty
                         price = products[products["اسم المنتج"] == prod]["سعر البيع"].iloc[0]
                         total_preview += price * qty
-                    st.write(f"الإجمالي الجديد المتوقع: {total_preview:,.2f} ريال")
+                    st.write(f"الإجمالي الجديد المتوقع: {total_preview:,.2f} جنية")
                 
                 if st.form_submit_button("حفظ التعديلات"):
-                    # Revert old quantities to stock
                     old_items = {p.split(":")[0].strip(): int(p.split(":")[1]) for p in order_data["المنتجات"].split(" | ")}
                     for prod, qty in old_items.items():
                         products.loc[products["اسم المنتج"] == prod, "المخزون"] += qty
                     
-                    # Apply new quantities
                     total = 0
                     order_details = []
                     for prod in selected_products:
@@ -273,34 +275,76 @@ elif selected == "المصروفات":
     if not expenses.empty:
         st.dataframe(expenses)
 
+elif selected == "الاسترداد":
+    st.header("استرداد المنتجات")
+    
+    if not orders.empty:
+        order_to_refund = st.selectbox("اختر الطلب للاسترداد", orders["معرف الطلب"])
+        order_data = orders[orders["معرف الطلب"] == order_to_refund].iloc[0]
+        
+        with st.form("refund_order"):
+            st.write("المنتجات في الطلب:", order_data["المنتجات"])
+            refund_items = {}
+            for item in order_data["المنتجات"].split(" | "):
+                prod, qty = item.split(":")
+                refund_qty = st.number_input(f"كمية الاسترداد لـ {prod}", min_value=0, max_value=int(qty), step=1, key=f"refund_{prod}")
+                if refund_qty > 0:
+                    refund_items[prod.strip()] = refund_qty
+            
+            if st.form_submit_button("تنفيذ الاسترداد"):
+                if not refund_items:
+                    st.error("يرجى اختيار كمية للاسترداد!")
+                else:
+                    total_refunded = 0
+                    old_items = {p.split(":")[0].strip(): int(p.split(":")[1]) for p in order_data["المنتجات"].split(" | ")}
+                    new_details = []
+                    for prod, old_qty in old_items.items():
+                        refund_qty = refund_items.get(prod, 0)
+                        if refund_qty > 0:
+                            price = products[products["اسم المنتج"] == prod]["سعر البيع"].iloc[0]
+                            total_refunded += price * refund_qty
+                            products.loc[products["اسم المنتج"] == prod, "المخزون"] += refund_qty
+                        remaining_qty = old_qty - refund_qty
+                        if remaining_qty > 0:
+                            new_details.append(f"{prod}: {remaining_qty}")
+                    
+                    if new_details:
+                        orders.loc[orders["معرف الطلب"] == order_to_refund, "المنتجات"] = " | ".join(new_details)
+                        orders.loc[orders["معرف الطلب"] == order_to_refund, "الإجمالي"] -= total_refunded
+                    else:
+                        orders = orders[orders["معرف الطلب"] != order_to_refund]
+                    
+                    save_data(products, orders, expenses)
+                    st.success(f"تم استرداد {total_refunded:,.2f} جنية بنجاح!")
+    else:
+        st.info("لا توجد طلبات للاسترداد.")
+
 elif selected == "الرؤى والإحصاءيات":
     st.header("الرؤى والإحصاءيات")
     
     if not orders.empty and not products.empty:
         total_income = orders["الإجمالي"].sum()
         total_expenses = expenses["المبلغ"].sum() if not expenses.empty else 0
-        product_costs = sum((products["سعر البيع"] - products["السعر الأصلي"]) * (products["المخزون"].max() - products["المخزون"])) if not products.empty else 0
-        net_profit = total_income - product_costs - total_expenses
+        sold_product_cost = sum(products["السعر الأصلي"] * (products["المخزون"].max() - products["المخزون"])) if not products.empty else 0
+        net_profit = total_income - (sold_product_cost + total_expenses)
         
         col1, col2, col3, col4 = st.columns(4)
         with col1:
-            st.metric("إجمالي الدخل", f"{total_income:,.2f} ريال")
+            st.metric("إجمالي الدخل", f"{total_income:,.2f} جنية")
         with col2:
-            st.metric("تكلفة المنتجات", f"{product_costs:,.2f} ريال")
+            st.metric("تكلفة المنتجات المباعة", f"{sold_product_cost:,.2f} جنية")
         with col3:
-            st.metric("المصروفات الإضافية", f"{total_expenses:,.2f} ريال")
+            st.metric("المصروفات الإضافية", f"{total_expenses:,.2f} جنية")
         with col4:
-            st.metric("صافي الربح", f"{net_profit:,.2f} ريال")
+            st.metric("صافي الربح", f"{net_profit:,.2f} جنية")
         
-        # Improved Charts
         st.subheader("تحليل المبيعات")
         orders["التاريخ"] = pd.to_datetime(orders["التاريخ"])
         daily_sales = orders.groupby(orders["التاريخ"].dt.date)["الإجمالي"].sum().reset_index()
         fig1 = px.line(daily_sales, x="التاريخ", y="الإجمالي", title="المبيعات اليومية",
-                      labels={"التاريخ": "التاريخ", "الإجمالي": "المبيعات (ريال)"})
+                      labels={"التاريخ": "التاريخ", "الإجمالي": "المبيعات (جنية)"})
         st.plotly_chart(fig1)
         
-        # Product Sales Breakdown
         product_sales = pd.DataFrame()
         for _, row in orders.iterrows():
             items = row["المنتجات"].split(" | ")
@@ -314,7 +358,7 @@ elif selected == "الرؤى والإحصاءيات":
                 })], ignore_index=True)
         fig2 = px.bar(product_sales.groupby("المنتج").sum().reset_index(), 
                      x="المنتج", y="الإجمالي", title="المبيعات حسب المنتج",
-                     labels={"المنتج": "اسم المنتج", "الإجمالي": "الإيرادات (ريال)"},
+                     labels={"المنتج": "اسم المنتج", "الإجمالي": "الإيرادات (جنية)"},
                      color="الكمية")
         st.plotly_chart(fig2)
 
@@ -353,3 +397,11 @@ elif selected == "التصدير":
             with open(DB_FILE, "wb") as f:
                 f.write(uploaded_file.getbuffer())
             st.success("تم رفع قاعدة البيانات! أعد تشغيل التطبيق.")
+
+elif selected == "إعادة تعيين":
+    st.header("إعادة تعيين التطبيق")
+    st.warning("سيؤدي هذا إلى حذف جميع البيانات (المنتجات، الطلبات، المصروفات). هل أنت متأكد؟")
+    if st.button("إعادة تعيين الكل"):
+        reset_db()
+        st.success("تم إعادة تعيين التطبيق بنجاح! أعد تشغيل الصفحة.")
+        st.experimental_rerun()
