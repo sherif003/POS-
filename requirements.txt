@@ -1,0 +1,5 @@
+streamlit
+streamlit-option-menu
+pandas
+plotly
+openpyxl  # Needed for Excel export functionality
